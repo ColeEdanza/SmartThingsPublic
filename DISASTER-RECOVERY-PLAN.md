@@ -5,7 +5,7 @@
 | Field               | Value                          |
 |---------------------|--------------------------------|
 | **Document Owner**  | [Practice Owner Name]          |
-| **Version**         | 1.0                            |
+| **Version**         | 1.1                            |
 | **Created**         | 2026-02-24                     |
 | **Last Reviewed**   | 2026-02-24                     |
 | **Next Review Due** | 2026-08-24 (6-month cycle)     |
@@ -50,9 +50,9 @@
 
 | Application                   | Purpose                        | Data Location on VM                     |
 |-------------------------------|--------------------------------|-----------------------------------------|
-| **Open Dental**               | Practice management / EHR      | MySQL/MariaDB database + OpenDentImages |
+| **Open Dental**               | Practice management / EHR      | MySQL/MariaDB database (default: `C:\mysql\data\opendental\`) + `OpenDentImages\` (A-Z folder) |
 | **CareStream CS Imaging 8**   | 2D dental imaging              | CS Imaging database (embedded SQL Server) + image files |
-| **Vatech Ez3D-i / EzDent-i**  | 3D CBCT imaging                | EzServer database + DICOM image store   |
+| **Vatech Ez3D-i / EzDent-i**  | 3D CBCT imaging                | EzServer database (`C:\Program files (x86)\Vatech\Common\FM`) + DICOM image store + capture programs (`C:\VCaptureSW\`) |
 
 ### 1.3 Data Classification
 
@@ -161,7 +161,7 @@ Any third party with access to ePHI must have a BAA in place. Review and documen
 
 | Vendor/Service | BAA in Place? | Date Signed | Notes |
 |----------------|---------------|-------------|-------|
-| Synology (if using C2 cloud) | [FILL IN] | [FILL IN] | Required if using Synology C2 |
+| Synology (if using C2 cloud) | [FILL IN] | [FILL IN] | **Synology only offers BAAs for their C2 cloud services** (C2 Object Storage, C2 Backup, C2 Transfer, C2 Password). The on-premise DS920+ itself does not require a BAA since you self-manage it, but if you add C2 cloud as a third backup tier, you MUST execute a BAA with Synology. Contact C2 support to request one. |
 | Off-site backup host (home) | N/A — self-managed | N/A | Owner is the covered entity |
 | IT support provider | [FILL IN] | [FILL IN] | Required for any IT vendor with ePHI access |
 | Open Dental (if using their cloud services) | [FILL IN] | [FILL IN] | |
@@ -600,10 +600,13 @@ exit /b
 ```
 
 > **Important notes:**
-> - If the Open Dental database uses **InnoDB** (recommended), the `--single-transaction` flag ensures a consistent snapshot without locking tables.
-> - If the database uses **MyISAM**, you must use `--lock-all-tables` instead. Refer to the Open Dental manual for your storage engine.
-> - Create a **dedicated MySQL user** with read-only (SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER) privileges for backups. Do not use root.
+> - Open Dental recommends **MariaDB 10.5** as the database engine. If you are still on MySQL 5.5, plan an upgrade. MySQL 5.5 is the minimum version required for InnoDB conversion, but MariaDB 10.5 is strongly recommended.
+> - If the Open Dental database uses **InnoDB** (recommended), the `--single-transaction` flag ensures a consistent snapshot without locking tables. The InnoDB storage engine does NOT work with most file-level "hot copy" or online backup tools — you must use logical dumps (`mysqldump`) or MariaDB's `mariabackup` utility.
+> - If the database uses **MyISAM**, you must use `--lock-all-tables` instead. Refer to the [Open Dental InnoDB documentation](https://www.opendental.com/site/mysqlinnodb.html) for your storage engine.
+> - Create a **dedicated MySQL user** with read-only (SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER) privileges for backups. Do not use root. See [Open Dental MySQL Security](https://opendental.com/manual/securitymysql.html).
+> - Do NOT expose the MySQL port (default 3306) to the internet. Do NOT give database credentials to third-party vendors with full control — read-only access is acceptable.
 > - The `D:\DatabaseBackups\` directory should be included in the Synology backup scope OR mapped to a Synology share.
+> - **Verification:** To verify a backup is good, restore it to a workstation that is NOT connected to the network. Ensure Open Dental and MySQL/MariaDB versions match the versions that were backed up.
 
 #### A.2 CareStream CS Imaging 8 (Embedded SQL Server) Database Backup
 
@@ -637,8 +640,9 @@ exit /b
 
 > **Notes:**
 > - The SQL Server instance name (`.\ADOREL_CS` above) is a placeholder — check your CS Imaging Server Configuration tool's Service tab for the actual instance name.
-> - CareStream also has a built-in scheduled database backup path configurable in the Server Configuration tool — verify this is active and pointing to the backup directory.
-> - Also back up the **CSDM Lite archive root path** (image files). This is typically a large folder; ensure it is within the VM-level backup scope.
+> - CareStream has a **built-in database backup path** configurable in the CS Imaging Server Configuration tool (Service tab → "Directory for database backup"). Verify this is active, pointing to your backup directory, and running on schedule. If a backup fails, CS Imaging 8 will display an error message to end users — do not ignore this.
+> - To locate your data paths: Open CS Imaging Server → Configure → General Setting tab → browse "Image Repository" path. This is your image store that must also be backed up.
+> - Also back up the **image repository** (image files). This is typically a large folder; ensure it is within the VM-level backup scope.
 
 #### A.3 Vatech EzServer Database Backup
 
@@ -655,8 +659,10 @@ SET BACKUP_DIR=D:\DatabaseBackups\Vatech
 IF NOT EXIST %BACKUP_DIR% MKDIR %BACKUP_DIR%
 
 REM Copy the EzServer data directory. Adjust the source path per your installation.
+REM Default path: C:\Program files (x86)\Vatech\Common\FM
 REM The data path is configured in Config_base.ini (see fm_top_dir= setting).
-SET VATECH_DATA="C:\EzServer\Data"
+REM Also back up capture programs at C:\VCaptureSW\
+SET VATECH_DATA="C:\Program files (x86)\Vatech\Common\FM"
 
 robocopy %VATECH_DATA% "%BACKUP_DIR%\ezserver_%TIMESTAMP%" /MIR /R:3 /W:5 /NP /LOG:"%BACKUP_DIR%\robocopy_log_%TIMESTAMP%.txt"
 
@@ -670,9 +676,41 @@ exit /b
 ```
 
 > **Notes:**
-> - Vatech recommends consulting their official backup documentation (available in the Customer Learning Center) for exact file and database paths.
-> - The EzServer data path may differ from the example above — check `Config_base.ini` for the `fm_top_dir=` value.
-> - CBCT data is very large. Ensure backup storage can accommodate the full dataset.
+> - **Vatech America states that ONLY certified IT professionals should set up, manage, and monitor daily backups.** Vatech support will only assist certified IT professionals due to HIPAA requirements. They will tell you *what* to back up, but will not recommend specific backup software or methodology.
+> - Default database path: `C:\Program files (x86)\Vatech\Common\FM` — but verify against your installation. Files may be on a different drive depending on what was selected during initial install.
+> - Also back up **capture programs** at `C:\VCaptureSW\`.
+> - Vatech recommends a **full PC clone/image** of the Capture PC for ease of restoration in the event of hardware failure.
+> - To locate the EzServer: if EzDent-i points to IP `127.0.0.1`, the database is on the same PC. Any other IP means it's on a separate server.
+> - The EzServer data path may differ — check `Config_base.ini` for the `fm_top_dir=` value.
+> - CBCT data is very large (200-500 MB per scan). Ensure backup storage can accommodate the full dataset.
+> - **Before any software updates:** Vatech requires a working backup be in place and verified before updating EzServer, EzDent-i, or Ez3D-i.
+
+#### A.3b Vatech Capture Programs Backup
+
+```batch
+@echo off
+REM === Vatech Capture Programs Backup ===
+REM Backs up the capture software and installation files.
+REM This is separate from the database - these are the programs that
+REM interface with the imaging hardware.
+
+SET TIMESTAMP=%DATE:~10,4%%DATE:~4,2%%DATE:~7,2%_%TIME:~0,2%%TIME:~3,2%
+SET TIMESTAMP=%TIMESTAMP: =0%
+SET BACKUP_DIR=D:\DatabaseBackups\VatechCapture
+
+IF NOT EXIST %BACKUP_DIR% MKDIR %BACKUP_DIR%
+
+REM Copy the capture programs directory
+robocopy "C:\VCaptureSW" "%BACKUP_DIR%\VCaptureSW_%TIMESTAMP%" /MIR /R:3 /W:5 /NP /LOG:"%BACKUP_DIR%\capture_robocopy_log_%TIMESTAMP%.txt"
+
+IF %ERRORLEVEL% LEQ 3 (
+    echo SUCCESS: Vatech capture programs backup completed at %DATE% %TIME% >> "%BACKUP_DIR%\backup_log.txt"
+) ELSE (
+    echo FAILURE: Vatech capture programs backup FAILED at %DATE% %TIME% >> "%BACKUP_DIR%\backup_log.txt"
+)
+
+exit /b
+```
 
 #### A.4 Master Backup Orchestrator
 
@@ -691,6 +729,7 @@ echo ============================================ >> D:\DatabaseBackups\master_l
 call D:\DatabaseBackups\Scripts\backup_opendental.bat
 call D:\DatabaseBackups\Scripts\backup_carestream.bat
 call D:\DatabaseBackups\Scripts\backup_vatech.bat
+call D:\DatabaseBackups\Scripts\backup_vatech_capture.bat
 
 echo Master backup finished at %DATE% %TIME% >> D:\DatabaseBackups\master_log.txt
 echo ============================================ >> D:\DatabaseBackups\master_log.txt
@@ -797,7 +836,7 @@ Print this, laminate it, and keep copies in the practice owner's wallet and the 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2026-02-24 | [FILL IN] | Initial creation |
-| | | | |
+| 1.1 | 2026-02-24 | [FILL IN] | Updated with vendor-specific backup paths (Vatech official FM path, CareStream Server Config tool references, Open Dental MariaDB 10.5 recommendation). Added Vatech capture programs backup script. Clarified Synology BAA availability (C2 cloud only). Added Open Dental MySQL security notes and backup verification guidance. |
 
 ---
 
